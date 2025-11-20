@@ -5,6 +5,25 @@ import os
 import mysql.connector
 from mysql.connector import Error
 
+from uuid import uuid4
+import json
+import pika
+
+def publish_queue(queue_name: str, message: dict):
+    credentials = pika.PlainCredentials('guest', 'guest')
+    params = pika.ConnectionParameters(host=os.getenv("RABBIT_HOST", "rabbitmq"), credentials=credentials, heartbeat=600, blocked_connection_timeout=300)
+    connection = pika.BlockingConnection(params)
+    channel = connection.channel()
+    channel.queue_declare(queue=queue_name, durable=True)
+    channel.basic_publish(
+        exchange='',
+        routing_key=queue_name,
+        body=json.dumps(message),
+        properties=pika.BasicProperties(
+            delivery_mode=2,  # make message persistent
+        )
+    )
+    connection.close()
 
 app = Flask(__name__)
 
@@ -127,6 +146,53 @@ def get_all_students():
     except Error as e:
         print("[DB]Error al Insertar", e)
         return bad_request("Error base de datos", 500) 
+
+@app.post("/api/v1/notifications/email")
+def notify_email():
+    if not request.is_json:
+        return jsonify({"error":"Debe ser JSON"}), 400
+    data = request.get_json(silent=True) or {}
+    # validar campos mínimos según tu criterio
+    if not data.get("to"):
+        return jsonify({"error":"Falta campo 'to'"}), 400
+
+    request_id = str(uuid4())
+    message = {
+        "request_id": request_id,
+        "type": "email",
+        "payload": data,
+        "balanceador": request.headers.get("Host", "unknown"),
+        "api_instance": os.getenv("HOSTNAME", "unknown")
+    }
+    try:
+        publish_queue("q.email", message)
+        return jsonify({"request_id": request_id}), 202
+    except Exception as e:
+        print("[API] Error publicando q.email:", e)
+        return jsonify({"error":"Error interno"}), 500
+
+@app.post("/api/v1/notifications/sms")
+def notify_sms():
+    if not request.is_json:
+        return jsonify({"error":"Debe ser JSON"}), 400
+    data = request.get_json(silent=True) or {}
+    if not data.get("to"):
+        return jsonify({"error":"Falta campo 'to'"}), 400
+
+    request_id = str(uuid4())
+    message = {
+        "request_id": request_id,
+        "type": "sms",
+        "payload": data,
+        "balanceador": request.headers.get("Host", "unknown"),
+        "api_instance": os.getenv("HOSTNAME", "unknown")
+    }
+    try:
+        publish_queue("q.sms", message)
+        return jsonify({"request_id": request_id}), 202
+    except Exception as e:
+        print("[API] Error publicando q.sms:", e)
+        return jsonify({"error":"Error interno"}), 500
 
 @app.get("/students/<int:student_id>")
 def get_student_by_id(student_id: int):
